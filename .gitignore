@@ -1,0 +1,4 @@
+/bin/
+deployctl.config.yaml
+*.pem
+.env
