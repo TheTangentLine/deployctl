@@ -251,15 +251,24 @@ Failure classes:
 
 Ask Argo CD to compare against Git now (`GET /api/v1/applications/{name}?refresh=normal`) instead of waiting up to its polling interval (3 minutes by default).
 
-- If the Application has an automated sync policy (the expected setup), refresh is enough; Argo CD syncs on its own once it sees the new revision.
-- If it does not, the step also calls `POST /api/v1/applications/{name}/sync` with `revision = sha`. *(proposed)*
-- Idempotent by nature. Retryable on network errors; permanent on `403` or `404` (misconfigured token or application name).
+- If `AppState.AutoSync` is true (the expected setup), refresh is enough; Argo CD syncs on its own once it sees the new revision.
+- If it is false, including when `automated.enabled: false`, the step also calls `POST /api/v1/applications/{name}/sync` with `revision = sha`. See the [AutoSync mapping rules](configuration.md#mapping-to-the-config-repo). *(proposed)*
+- Refresh is safe to repeat. Before repeating a manual sync after an uncertain
+  response, inspect `AppState.Operation` and its revision to distinguish a pending,
+  running or completed sync from an older operation. See the [operation snapshot
+  contract](architecture.md#key-interfaces). Retryable on network errors; permanent
+  on `403` or `404` (misconfigured token or application name).
 
 ### `wait_healthy`
 
 Purpose: prove the change is live and healthy, or fail with enough information to act.
 
 The step polls every `worker.pollInterval` (default `5s`) until `worker.rolloutTimeout` (default `5m`) has passed **since the step first started** (`steps.first_started_at`, so a worker crash does not reset the clock).
+
+`AppState.SyncRevision` maps directly to Argo CD's `status.sync.revision`: the Git
+revision used for the latest comparison. It can point to the new commit while the
+application is still `OutOfSync`, so the revision alone does not prove a successful
+rollout.
 
 Success requires **all** of:
 
