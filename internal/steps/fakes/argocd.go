@@ -27,6 +27,9 @@ type ImageQuery struct {
 //	States: map[string][]steps.AppState{
 //		"reconcile-dev": {progressing, progressing, healthy},
 //	}
+//
+// Set AppState.Operation in snapshots to script pending, running or completed
+// syncs. Get copies the operation so callers cannot change the fixture.
 type Argo struct {
 	mu sync.Mutex
 
@@ -66,7 +69,12 @@ func (a *Argo) Get(ctx context.Context, app string, refresh bool) (steps.AppStat
 	if i < len(states)-1 {
 		a.next[app] = i + 1
 	}
-	return states[i], nil
+	state := states[i]
+	if state.Operation != nil {
+		operation := *state.Operation
+		state.Operation = &operation
+	}
+	return state, nil
 }
 
 func (a *Argo) GetDesiredImages(ctx context.Context, app, revision, namespace, selector string) (map[string]string, error) {

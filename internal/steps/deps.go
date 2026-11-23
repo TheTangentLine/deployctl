@@ -43,11 +43,19 @@ type GitRepo interface {
 // --------------------------- Argo CD ---------------------------
 
 type AppState struct {
-	SyncStatus    string // Synced, OutOfSync, Unknown
-	SyncRevision  string // commit SHA Argo CD last synced
-	Health        string // Healthy, Progressing, Degraded, Suspended, Missing, Unknown
-	HealthMessage string // e.g. "Deployment exceeded its progress deadline"
-	AutoSync      bool   // whether syncPolicy.automated is set
+	SyncStatus    string              // Synced, OutOfSync, Unknown
+	SyncRevision  string              // Git revision used for the latest comparison
+	Health        string              // Healthy, Progressing, Degraded, Suspended, Missing, Unknown
+	HealthMessage string              // e.g. "Deployment exceeded its progress deadline"
+	AutoSync      bool                // whether automated sync is enabled
+	Operation     *SyncOperationState // pending, active or latest sync; nil if unknown
+}
+
+// SyncOperationState describes a sync operation independently of app health.
+type SyncOperationState struct {
+	Revision string // resolved Git SHA, or requested revision if unresolved (may be empty)
+	Phase    string // Pending, Running, Terminating, Succeeded, Failed, Error
+	Message  string // operation details or failure reason
 }
 
 type ArgoClient interface {
@@ -58,8 +66,7 @@ type ArgoClient interface {
 	// GetDesiredImages returns desired container images for a Deployment at a Git revision.
 	GetDesiredImages(ctx context.Context, app, revision, namespace, selector string) (map[string]string, error)
 
-	// Sync asks Argo CD to apply the given revision. Only needed when the
-	// application has no automated sync policy.
+	// Sync asks Argo CD to apply the given revision when automated sync is disabled.
 	Sync(ctx context.Context, app, revision string) error
 }
 

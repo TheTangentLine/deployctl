@@ -303,9 +303,16 @@ type Client interface {
 
 type AppState struct {
     SyncStatus   string // Synced, OutOfSync, Unknown
-    SyncRevision string // commit SHA Argo CD last synced
+    SyncRevision string // Git revision used for the latest comparison
     Health       string // Healthy, Progressing, Degraded, Suspended, Missing, Unknown
-    OperationPhase string
+    AutoSync     bool   // whether automated sync is enabled
+    Operation    *SyncOperationState // pending, active or latest sync; nil if unknown
+}
+
+type SyncOperationState struct {
+    Revision string // resolved Git SHA, or requested revision if unresolved (may be empty)
+    Phase    string // Pending, Running, Terminating, Succeeded, Failed, Error
+    Message  string // operation details or failure reason
 }
 
 // internal/kube
@@ -324,6 +331,22 @@ label selector. It returns full image references keyed by container name from
 init containers. It does not use `status.summary.images`. Zero or multiple matching
 Deployments, or unsupported configuration, are permanent errors; a missing
 application wraps `steps.ErrNotFound`.
+
+`AppState.Operation` describes a sync independently of comparison status and
+health. The client maps Argo CD's `operation.sync` and `status.operationState`:
+
+- A requested sync without a matching active operation state is `Pending`.
+  Use the requested revision and an empty message, ignoring a previous completed
+  operation even if it has the same revision.
+- A matching active operation or the latest recorded sync uses the phase and
+  message from `status.operationState`. Prefer `syncResult.revision`; if absent,
+  use `operation.sync.revision` from that same operation state.
+- Neither source contains a sync operation: return `nil`. An unresolved revision
+  may be a branch, tag or empty; never substitute `AppState.SyncRevision`.
+
+Consumers must match the operation revision to the request before interpreting
+its phase. `Succeeded` describes the sync operation, not rollout health. This
+snapshot helps reconcile retries but does not guarantee exactly-once sync calls.
 
 ## Scaling characteristics
 
