@@ -299,6 +299,7 @@ type Client interface {
     Get(ctx context.Context, app string, refresh bool) (AppState, error)
     // Desired images are read separately from the application status snapshot.
     GetDesiredImages(ctx context.Context, app, revision, namespace, selector string) (map[string]string, error)
+    Sync(ctx context.Context, app, revision string) error
 }
 
 type AppState struct {
@@ -332,21 +333,47 @@ init containers. It does not use `status.summary.images`. Zero or multiple match
 Deployments, or unsupported configuration, are permanent errors; a missing
 application wraps `steps.ErrNotFound`.
 
+The M0 client accepts a full 40-character Git SHA. It reads the Application's
+effective source (`sources` takes precedence over `source`) and destination
+namespace before requesting manifests. A single entry in `sources` is pinned
+using `sourcePositions=1` and `revisions=<SHA>` in addition to `revision=<SHA>`.
+Argo CD v3.6.2's endpoint returns only the combined manifests, without a resolved
+revision; the request pins the SHA. If a server includes a non-empty revision,
+the client checks that it matches. See the [v3.6.2 implementation](https://github.com/argoproj/argo-cd/blob/v3.6.2/server/application/application.go#L464-L618).
+
+Deployment selection uses Kubernetes label-selector syntax on pod-template
+labels. An omitted manifest namespace uses the Application's destination
+namespace; an unresolved namespace is an error. Only `apps/v1` Deployments are
+supported; `List`/`DeploymentList` wrappers, source hydration and reference-only
+sources are unsupported. Git-hosted Helm charts are supported; Helm repository
+and OCI sources are not. Regular containers require non-empty, unique names
+and non-empty images. Each call returns a new map.
+
 `AppState.Operation` describes a sync independently of comparison status and
 health. The client maps Argo CD's `operation.sync` and `status.operationState`:
 
 - A requested sync without a matching active operation state is `Pending`.
   Use the requested revision and an empty message, ignoring a previous completed
   operation even if it has the same revision.
+- An active state matches only when its phase is `Running` or `Terminating` and
+  its `operation.sync.revision` equals the current request's `operation.sync.revision`,
+  including empty revisions. Do not compare against the resolved revision.
 - A matching active operation or the latest recorded sync uses the phase and
-  message from `status.operationState`. Prefer `syncResult.revision`; if absent,
+  message from `status.operationState`. Prefer a non-empty `syncResult.revision`; otherwise,
   use `operation.sync.revision` from that same operation state.
-- Neither source contains a sync operation: return `nil`. An unresolved revision
-  may be a branch, tag or empty; never substitute `AppState.SyncRevision`.
+- Without a current sync request, a recorded state needs a non-empty phase and
+  either `operation.sync` or `syncResult`; otherwise return `nil`. An unresolved
+  revision may be a branch, tag or empty; never substitute `AppState.SyncRevision`.
 
 Consumers must match the operation revision to the request before interpreting
 its phase. `Succeeded` describes the sync operation, not rollout health. This
 snapshot helps reconcile retries but does not guarantee exactly-once sync calls.
+
+`Client.Sync` sends one request for the supplied revision; success means the API
+accepted it. The caller decides when to inspect `Get` again. The client does not
+poll or resend the request. For Argo CD v3.6.2, HTTP 400 with gRPC code 9 and the
+exact message `another operation is already in progress` is retryable; other
+errors retain the shared client classification.
 
 ## Scaling characteristics
 
