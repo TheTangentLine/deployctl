@@ -3,12 +3,21 @@ package fakes
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/TheTangentLine/deployctl/internal/steps"
 )
 
 var _ steps.ArgoClient = (*Argo)(nil)
+
+// ImageQuery identifies a desired-images fixture independently of app state.
+type ImageQuery struct {
+	App       string
+	Revision  string
+	Namespace string
+	Selector  string
+}
 
 // Argo is a fake Argo CD with one or more applications.
 //
@@ -22,6 +31,9 @@ type Argo struct {
 	mu sync.Mutex
 
 	States map[string][]steps.AppState
+	// ImageSets maps an exact query to container name -> full image reference.
+	// GetDesiredImages returns a copy so callers cannot change the fixture.
+	ImageSets map[ImageQuery]map[string]string
 	// Refreshes counts Get calls with refresh=true, per app.
 	Refreshes map[string]int
 	// Syncs records every Sync call as "app@revision".
@@ -55,6 +67,26 @@ func (a *Argo) Get(ctx context.Context, app string, refresh bool) (steps.AppStat
 		a.next[app] = i + 1
 	}
 	return states[i], nil
+}
+
+func (a *Argo) GetDesiredImages(ctx context.Context, app, revision, namespace, selector string) (map[string]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.Err["GetDesiredImages"]; err != nil {
+		return nil, err
+	}
+	if _, ok := a.States[app]; !ok {
+		return nil, fmt.Errorf("application %s: %w", app, steps.ErrNotFound)
+	}
+	query := ImageQuery{App: app, Revision: revision, Namespace: namespace, Selector: selector}
+	images, ok := a.ImageSets[query]
+	if !ok {
+		return nil, fmt.Errorf("desired images for %+v: fixture not configured", query)
+	}
+	return maps.Clone(images), nil
 }
 
 func (a *Argo) Sync(ctx context.Context, app, revision string) error {

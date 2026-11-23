@@ -297,6 +297,8 @@ type Repo interface {
 // internal/argocd
 type Client interface {
     Get(ctx context.Context, app string, refresh bool) (AppState, error)
+    // Desired images are read separately from the application status snapshot.
+    GetDesiredImages(ctx context.Context, app, revision, namespace, selector string) (map[string]string, error)
 }
 
 type AppState struct {
@@ -313,6 +315,15 @@ type Reader interface {
     Logs(ctx context.Context, namespace, pod, container string, tailLines int64) (string, error)
 }
 ```
+
+`steps.ArgoClient.GetDesiredImages` reads rendered manifests at the supplied full Git
+commit SHA, independently of `AppState`. In M0 it supports applications with one
+Git source and exactly one Deployment matching the namespace and pod-template
+label selector. It returns full image references keyed by container name from
+`spec.template.spec.containers`, including sidecars in that list and excluding
+init containers. It does not use `status.summary.images`. Zero or multiple matching
+Deployments, or unsupported configuration, are permanent errors; a missing
+application wraps `steps.ErrNotFound`.
 
 ## Scaling characteristics
 
