@@ -4,8 +4,11 @@
 //
 //   - internal/steps imports no client package (it uses interfaces only).
 //   - internal/git, internal/argocd and internal/kube do not import each other.
-//   - internal/api (from M1) never depends on internal/git, so the API can
-//     never push to Git.
+//   - internal/api (from M1) never depends on internal/git or
+//     internal/githubapp, so the API can never push to Git or mint a
+//     GitHub token.
+//   - internal/git does not depend on internal/githubapp; the worker wires
+//     them together with git.TokenAuth.
 package archtest
 
 import (
@@ -21,11 +24,12 @@ var rules = []struct {
 	pkg       string
 	forbidden []string
 }{
-	{"internal/steps", []string{"internal/git", "internal/argocd", "internal/kube", "internal/store", "internal/worker"}},
-	{"internal/git", []string{"internal/argocd", "internal/kube"}},
-	{"internal/argocd", []string{"internal/git", "internal/kube"}},
-	{"internal/kube", []string{"internal/git", "internal/argocd"}},
-	{"internal/api", []string{"internal/git"}},
+	{"internal/steps", []string{"internal/git", "internal/githubapp", "internal/argocd", "internal/kube", "internal/store", "internal/worker"}},
+	{"internal/git", []string{"internal/githubapp", "internal/argocd", "internal/kube"}},
+	{"internal/githubapp", []string{"internal/git", "internal/argocd", "internal/kube"}},
+	{"internal/argocd", []string{"internal/git", "internal/githubapp", "internal/kube"}},
+	{"internal/kube", []string{"internal/git", "internal/githubapp", "internal/argocd"}},
+	{"internal/api", []string{"internal/git", "internal/githubapp"}},
 }
 
 func TestImportRules(t *testing.T) {

@@ -23,6 +23,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/storer"
 	"github.com/go-git/go-git/v5/plumbing/transport"
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 
 	"github.com/TheTangentLine/deployctl/internal/steps"
 )
@@ -43,7 +44,7 @@ type Repo struct {
 	AuthorEmail string
 
 	cacheDir string
-	auth     transport.AuthMethod // nil for local repos in tests
+	auth     AuthFunc // nil for local or public repos
 
 	mu     sync.Mutex
 	clones map[string]*clone // repo URL -> local clone
@@ -64,10 +65,38 @@ type clone struct {
 	repo *git.Repository
 }
 
+// AuthFunc returns the credentials for talking to the remote. It is called
+// before every clone, fetch and push, so a source of short-lived tokens
+// (GitHub App installation tokens last one hour) is asked each time and
+// can refresh. Return a nil AuthMethod for no authentication.
+type AuthFunc func(ctx context.Context) (transport.AuthMethod, error)
+
+// TokenAuth turns a token source into an AuthFunc for HTTPS remotes, using
+// the token as the password, which is how GitHub accepts installation
+// tokens over Git.
+func TokenAuth(token func(ctx context.Context) (string, error)) AuthFunc {
+	return func(ctx context.Context) (transport.AuthMethod, error) {
+		t, err := token(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("git credentials: %w", err)
+		}
+		return &githttp.BasicAuth{Username: "x-access-token", Password: t}, nil
+	}
+}
+
+// authMethod returns the credentials for one operation.
+func (r *Repo) authMethod(ctx context.Context) (transport.AuthMethod, error) {
+	if r.auth == nil {
+		return nil, nil
+	}
+	return r.auth(ctx)
+}
+
 // New returns a Repo that keeps clones under cacheDir.
-// auth is how to authenticate to the remote (the GitHub App token source
-// in production); pass nil for local repositories.
-func New(cacheDir string, auth transport.AuthMethod) (*Repo, error) {
+// auth provides credentials for the remote; pass nil for local or public
+// repositories. In production it is TokenAuth over a GitHub App token
+// source (internal/githubapp).
+func New(cacheDir string, auth AuthFunc) (*Repo, error) {
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 		return nil, fmt.Errorf("git cache dir: %w", err)
 	}
@@ -334,10 +363,14 @@ func (r *Repo) push(ctx context.Context, repo *git.Repository, commit plumbing.H
 	if err := repo.Storer.SetReference(plumbing.NewHashReference(local, commit)); err != nil {
 		return err
 	}
-	err := repo.PushContext(ctx, &git.PushOptions{
+	auth, err := r.authMethod(ctx)
+	if err != nil {
+		return err
+	}
+	err = repo.PushContext(ctx, &git.PushOptions{
 		RemoteName: "origin",
 		RefSpecs:   []config.RefSpec{config.RefSpec(string(local) + ":refs/heads/" + branch)},
-		Auth:       r.auth,
+		Auth:       auth,
 	})
 	switch {
 	case err == nil:
@@ -440,9 +473,13 @@ func (r *Repo) open(ctx context.Context, url string) (*clone, error) {
 		return nil, fmt.Errorf("clean %s: %w", dir, err)
 	}
 
+	auth, err := r.authMethod(ctx)
+	if err != nil {
+		return nil, err
+	}
 	repo, err := git.PlainCloneContext(ctx, dir, false, &git.CloneOptions{
 		URL:        url,
-		Auth:       r.auth,
+		Auth:       auth,
 		NoCheckout: true, // reads go through Git objects, not files on disk
 	})
 	if err != nil {
@@ -458,10 +495,14 @@ func (r *Repo) open(ctx context.Context, url string) (*clone, error) {
 // Callers must hold c.mu.
 func (r *Repo) fetch(ctx context.Context, c *clone, branch string) error {
 	spec := config.RefSpec(fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch))
-	err := c.repo.FetchContext(ctx, &git.FetchOptions{
+	auth, err := r.authMethod(ctx)
+	if err != nil {
+		return err
+	}
+	err = c.repo.FetchContext(ctx, &git.FetchOptions{
 		RemoteName: "origin",
 		RefSpecs:   []config.RefSpec{spec},
-		Auth:       r.auth,
+		Auth:       auth,
 		Force:      true,
 	})
 	if err == nil || errors.Is(err, git.NoErrAlreadyUpToDate) {
