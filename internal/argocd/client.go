@@ -125,10 +125,16 @@ func decodeError(ctx context.Context, err error) error {
 	return requestError(ctx, wrapped)
 }
 
-// responseError retains the HTTP status and Argo CD message for callers.
+// responseError retains the HTTP status, gRPC code and Argo CD message.
 type responseError struct {
 	statusCode int
+	grpcCode   int
 	message    string
+}
+
+type errorResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
 }
 
 func (e *responseError) Error() string {
@@ -137,9 +143,7 @@ func (e *responseError) Error() string {
 
 func decodeResponseError(resp *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	var body struct {
-		Message string `json:"message"`
-	}
+	var body errorResponse
 	message := strings.TrimSpace(string(data))
 	if json.Unmarshal(data, &body) == nil && body.Message != "" {
 		message = body.Message
@@ -147,7 +151,7 @@ func decodeResponseError(resp *http.Response) error {
 	if message == "" {
 		message = http.StatusText(resp.StatusCode)
 	}
-	err := &responseError{statusCode: resp.StatusCode, message: message}
+	err := &responseError{statusCode: resp.StatusCode, grpcCode: body.Code, message: message}
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		return fmt.Errorf("%w: %w", err, steps.ErrNotFound)

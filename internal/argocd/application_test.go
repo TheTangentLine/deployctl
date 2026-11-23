@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -72,6 +73,7 @@ func TestGetState(t *testing.T) {
 				Health:        "Degraded",
 				HealthMessage: "Deployment exceeded its progress deadline",
 				AutoSync:      true,
+				Operation:     &steps.SyncOperationState{Revision: "requested-sha", Phase: "Pending"},
 			},
 		},
 		{
@@ -112,7 +114,7 @@ func TestGetState(t *testing.T) {
 			defer server.Close()
 			client := newTestClient(t, server.URL, server.Client())
 			got, err := client.Get(context.Background(), "backend-prod", false)
-			if err != nil || got != tc.want {
+			if err != nil || !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("state = %+v, want %+v; error = %v", got, tc.want, err)
 			}
 		})
@@ -162,6 +164,7 @@ func TestGetErrors(t *testing.T) {
 		{"null JSON", `null`, "response must not be null", 200, false, false},
 		{"wrong field type", `{"status":{"sync":{"status":"Synced"},"health":{"status":42}}}`, "decode response", 200, false, false},
 		{"wrong enabled type", `{"spec":{"syncPolicy":{"automated":{"enabled":"false"}}}}`, "decode response", 200, false, false},
+		{"wrong operation phase type", `{"status":{"operationState":{"phase":42}}}`, "decode response", 200, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int32
