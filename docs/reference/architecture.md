@@ -333,6 +333,22 @@ init containers. It does not use `status.summary.images`. Zero or multiple match
 Deployments, or unsupported configuration, are permanent errors; a missing
 application wraps `steps.ErrNotFound`.
 
+The M0 client accepts a full 40-character Git SHA. It reads the Application's
+effective source (`sources` takes precedence over `source`) and destination
+namespace before requesting manifests. A single entry in `sources` is pinned
+using `sourcePositions=1` and `revisions=<SHA>` in addition to `revision=<SHA>`.
+Argo CD v3.6.2's endpoint returns only the combined manifests, without a resolved
+revision; the request pins the SHA. If a server includes a non-empty revision,
+the client checks that it matches. See the [v3.6.2 implementation](https://github.com/argoproj/argo-cd/blob/v3.6.2/server/application/application.go#L464-L618).
+
+Deployment selection uses Kubernetes label-selector syntax on pod-template
+labels. An omitted manifest namespace uses the Application's destination
+namespace; an unresolved namespace is an error. Only `apps/v1` Deployments are
+supported; `List`/`DeploymentList` wrappers, source hydration and reference-only
+sources are unsupported. Git-hosted Helm charts are supported; Helm repository
+and OCI sources are not. Regular containers require non-empty, unique names
+and non-empty images. Each call returns a new map.
+
 `AppState.Operation` describes a sync independently of comparison status and
 health. The client maps Argo CD's `operation.sync` and `status.operationState`:
 

@@ -2,6 +2,7 @@ package argocd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -18,7 +19,22 @@ type application struct {
 }
 
 type applicationSpec struct {
-	SyncPolicy syncPolicy `json:"syncPolicy"`
+	SyncPolicy     syncPolicy             `json:"syncPolicy"`
+	Source         *applicationSource     `json:"source"`
+	Sources        []applicationSource    `json:"sources"`
+	Destination    applicationDestination `json:"destination"`
+	SourceHydrator json.RawMessage        `json:"sourceHydrator"`
+}
+
+type applicationSource struct {
+	RepoURL string `json:"repoURL"`
+	Path    string `json:"path"`
+	Chart   string `json:"chart"`
+	Ref     string `json:"ref"`
+}
+
+type applicationDestination struct {
+	Namespace string `json:"namespace"`
 }
 
 type syncPolicy struct {
@@ -66,19 +82,9 @@ type syncOperationResult struct {
 
 // Get reads the application state, optionally refreshing it first.
 func (c *Client) Get(ctx context.Context, app string, refresh bool) (steps.AppState, error) {
-	if strings.TrimSpace(app) == "" {
-		return steps.AppState{}, errors.New("argocd application name must not be empty")
-	}
-	query := url.Values{}
-	if refresh {
-		query.Set("refresh", "normal")
-	}
-	var snapshot *application
-	if err := c.doJSON(ctx, http.MethodGet, []string{"applications", app}, query, nil, &snapshot); err != nil {
-		return steps.AppState{}, fmt.Errorf("argocd get application %q: %w", app, err)
-	}
-	if snapshot == nil {
-		return steps.AppState{}, fmt.Errorf("argocd get application %q: response must not be null", app)
+	snapshot, err := c.getApplication(ctx, app, refresh)
+	if err != nil {
+		return steps.AppState{}, err
 	}
 	state := steps.AppState{
 		SyncStatus:    snapshot.Status.Sync.Status,
@@ -96,6 +102,25 @@ func (c *Client) Get(ctx context.Context, app string, refresh bool) (steps.AppSt
 	automated := snapshot.Spec.SyncPolicy.Automated
 	state.AutoSync = automated != nil && (automated.Enabled == nil || *automated.Enabled)
 	return state, nil
+}
+
+// getApplication reads the API document before mapping its status.
+func (c *Client) getApplication(ctx context.Context, app string, refresh bool) (*application, error) {
+	if strings.TrimSpace(app) == "" {
+		return nil, errors.New("argocd application name must not be empty")
+	}
+	query := url.Values{}
+	if refresh {
+		query.Set("refresh", "normal")
+	}
+	var snapshot *application
+	if err := c.doJSON(ctx, http.MethodGet, []string{"applications", app}, query, nil, &snapshot); err != nil {
+		return nil, fmt.Errorf("argocd get application %q: %w", app, err)
+	}
+	if snapshot == nil {
+		return nil, fmt.Errorf("argocd get application %q: response must not be null", app)
+	}
+	return snapshot, nil
 }
 
 // syncOperationState separates a new sync request from a previous operation.
