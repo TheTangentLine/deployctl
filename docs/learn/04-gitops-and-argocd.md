@@ -114,7 +114,10 @@ For each Application, Argo CD reports two things:
 | `OutOfSync` | Something differs (Git changed, or someone changed the cluster) |
 | `Unknown` | Argo CD could not compare (for example, the repo was unreachable) |
 
-Argo CD also reports **which commit** it last synced to, the **sync revision**. Remember this; deployctl uses it.
+Argo CD also reports **which commit** it last compared the cluster against, the
+**sync revision**. Seeing a new revision does not mean it has been applied yet:
+the application may still be `OutOfSync`. deployctl checks revision, sync status,
+health and pods together.
 
 **Health**: are the objects working?
 

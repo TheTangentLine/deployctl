@@ -226,7 +226,15 @@ spec:
       selfHeal: true
 ```
 
-`syncPolicy.automated` is what makes Argo CD apply a new commit by itself after `argocd_refresh`. `selfHeal: true` is what reverts manual changes in the cluster.
+When automated sync is enabled, Argo CD applies a new commit by itself after
+`argocd_refresh`. `AppState.AutoSync` reports whether it is enabled:
+
+- No `spec.syncPolicy.automated`, or `automated.enabled: false`: `AutoSync = false`.
+- `automated` exists and `enabled` is `true`, omitted or `null`: `AutoSync = true`.
+
+These rules follow Argo CD's [automated sync policy](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/).
+When `AutoSync` is false, the worker must request a manual sync after refreshing.
+`selfHeal: true` reverts manual cluster changes while automated sync is enabled.
 
 The pod template must carry the label used in `kube.labelSelector`:
 
