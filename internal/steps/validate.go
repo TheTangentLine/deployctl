@@ -22,10 +22,10 @@ import (
 // Argo CD error is retried. Problems with the request itself (no earlier
 // deployment to roll back to, autoscaled app) are permanent.
 type Validate struct {
-	Git     GitRepo
-	Argo    ArgoClient
-	Kube    KubeReader // needed for scale
-	History History    // needed for rollback
+	Git         GitRepo
+	Argo        ArgoClient
+	Autoscaling AutoscalingReader // needed for scale; real reader arrives in M5
+	History     History           // needed for rollback
 }
 
 var _ Step = Validate{}
@@ -43,10 +43,10 @@ func (v Validate) Run(ctx context.Context, in Input) (Result, error) {
 
 	// A fixed replica count and an HPA fight each other.
 	if req.Kind == KindScale {
-		if v.Kube == nil {
-			return Result{}, errors.New("validate: no Kubernetes reader configured")
+		if v.Autoscaling == nil {
+			return Result{}, errors.New("validate: no autoscaling reader configured")
 		}
-		autoscaled, err := v.Kube.IsAutoscaled(ctx, t.Namespace, t.Selector)
+		autoscaled, err := v.Autoscaling.IsAutoscaled(ctx, t.Namespace, t.Selector)
 		if err != nil {
 			return Result{}, err
 		}
