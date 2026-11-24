@@ -14,6 +14,10 @@ import (
 //
 // Run must not touch the database. It receives everything it needs in
 // Input and returns everything it learned in Result; the worker stores it.
+//
+// When Run fails, it may still return a Result whose Outputs and Message
+// explain the failure (wait_healthy puts its diagnostics there). The worker
+// stores those Outputs with the failed step; the Outcome is ignored.
 type Step interface {
 	Name() string
 	Run(ctx context.Context, in Input) (Result, error)
@@ -128,7 +132,8 @@ const (
 	Waiting Outcome = "waiting"
 )
 
-// Result is what a step returns when it did not fail.
+// Result is what a step returns. On success Outcome says how it finished;
+// on failure (non-nil error) only Outputs and Message are meaningful.
 type Result struct {
 	Outcome Outcome
 	Outputs Outputs // in.Outputs with this step's additions
