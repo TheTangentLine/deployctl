@@ -316,13 +316,71 @@ type SyncOperationState struct {
     Message  string // operation details or failure reason
 }
 
-// internal/kube
-type Reader interface {
+// internal/steps: implemented by internal/kube
+type KubeReader interface {
     Pods(ctx context.Context, namespace, selector string) ([]Pod, error)
-    Events(ctx context.Context, namespace string, involved []string) ([]Event, error)
-    Logs(ctx context.Context, namespace, pod, container string, tailLines int64) (string, error)
+    Events(ctx context.Context, namespace string, objects []string, limit int) ([]Event, error)
+    Logs(ctx context.Context, namespace, pod, container string, previous bool, tailLines int64) (string, error)
+}
+
+// Separate capability for scale. Real Kubernetes implementation: M5.
+type AutoscalingReader interface {
+    IsAutoscaled(ctx context.Context, namespace, selector string) (bool, error)
 }
 ```
+
+`steps.Pod` is a read-only snapshot with UID, readiness, phase, terminating
+state and a controller `Owner` reference (kind, name, UID; nil if absent).
+`Containers` and `InitContainers` preserve spec order separately. Each container
+records name, spec image, unmodified runtime image ID, readiness, restart count,
+state (`Unknown`, `Waiting`, `Running`, `Terminated`), reason and message.
+Missing status means Unknown, not ready and zero restarts. `Images` contains only
+regular-container spec images; `Restarts` totals regular and init containers.
+Snapshot readiness and termination are independent; the consumer checks both.
+
+`Validate` needs `AutoscalingReader` only for scale and fails when it is absent.
+Deploy and rollback do not need it. M0 tests use `fakes.Autoscaling`, independently
+of `fakes.Kube`; the latter returns independent deep copies of scripted pod
+snapshots and keeps returning the last snapshot after the script ends.
+
+The read-only `kube.Client` is constructed with `New(kubernetes.Interface)` for
+injection, or `NewForConfig(*rest.Config)` for a real cluster. `LoadConfig` loads
+explicit `KUBECONFIG` paths, otherwise in-cluster credentials; it never falls back
+to `~/.kube/config`. Invalid explicit configuration is an error. Constructors do
+not modify the caller's config. Reads have a 30-second maximum per operation
+(across all list pages), bounded further by the caller's context/config timeout.
+The wrapper does not implement worker retry/backoff logic.
+
+`Pods` requires a namespace and a non-empty valid Kubernetes selector. It lists
+all pages, returns snapshots sorted by name, and includes terminating pods.
+`Ready` comes from the PodReady condition, not the Running phase. Container
+statuses are joined to spec entries by name; status-only entries are ignored.
+Pod reason prefers `status.reason`, then the first non-ready container reason
+(init containers before regular containers). No matched pods is an empty result,
+not evidence that the namespace is missing.
+
+Kubernetes 404 errors wrap `steps.ErrNotFound`; 429, 5xx, temporary transport errors
+and client-imposed timeouts are retryable. Invalid inputs, authentication and
+authorization failures are permanent. Caller cancellation/deadline errors are
+preserved and are not retryable. Original causes remain available via errors.Is/As.
+
+`Events` requires a namespace, non-empty names in `objects`, and a positive limit.
+An empty objects list returns no events without an API call. It reads all pages
+of core/v1 namespace events, keeps only Pod/ReplicaSet events matching the names,
+then applies the limit after sorting newest first. The observation time is the
+maximum of series.lastObservedTime, lastTimestamp, eventTime and creationTimestamp;
+ties sort by event name. The interface does not accept object UIDs, so events
+for an older object with a reused name may also match. The fake's EventList
+contains already ordered Pod/ReplicaSet fixtures.
+
+`Logs` requires namespace, pod, container and positive tailLines. It reads exactly
+the requested current/previous container instance, without following, retrying
+the log request, or falling back from previous to current logs. It closes the
+stream on success, truncation, cancellation and read failure. Returned text is
+the first 64 KiB of the requested tail at most; truncation is byte-based and can
+split a line or UTF-8 character. There is no truncation flag in this interface.
+The future wait_healthy step chooses 20 events and 50 lines per non-ready
+container, and separately enforces the combined 64 KiB/request diagnostics cap.
 
 `steps.ArgoClient.GetDesiredImages` reads rendered manifests at the supplied full Git
 commit SHA, independently of `AppState`. In M0 it supports applications with one
