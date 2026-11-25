@@ -210,6 +210,14 @@ Golden tests in `testdata/yaml/` check that the diff between input and output is
 | CLI | Rendering and exit codes | Golden output from canned API responses |
 | End to end *(planned)* | Full deploy, prod approval, failed rollout, rollback | kind + Argo CD + local bare repo in CI |
 
+The implemented kube M0 client is tested without a cluster: client-go fakes
+exercise pod mapping and event selection, while HTTP/transport fixtures check
+pagination, log query parameters, stream closure, byte limits, cancellation and
+error classes. Run `go test -race ./internal/kube ./internal/steps/...` for these
+tests and the independent snapshot/HPA fakes. The real HPA lookup is deferred to
+M5 behind `steps.AutoscalingReader`; the kube client implements only
+`steps.KubeReader`. `wait_healthy` and API/worker integration are still pending.
+
 Store tests worth writing first, because they protect the core guarantees:
 
 ```go

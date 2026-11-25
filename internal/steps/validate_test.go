@@ -30,7 +30,7 @@ func (w world) validate() (steps.Validate, *fakes.Git) {
 		git.Values[replicasRef(devTarget)] = w.replicas
 	}
 	argo := &fakes.Argo{States: map[string][]steps.AppState{devTarget.ArgoApp: {w.argo}}, Err: map[string]error{}}
-	kube := &fakes.Kube{Autoscaled: w.autoscaled, Err: map[string]error{}}
+	autoscaling := &fakes.Autoscaling{Autoscaled: w.autoscaled}
 	hist := &fakes.History{Tags: map[string][]string{"backend/dev": w.history}}
 	for name, err := range w.errs {
 		switch {
@@ -38,13 +38,13 @@ func (w world) validate() (steps.Validate, *fakes.Git) {
 			git.Err[strings.TrimPrefix(name, "Git.")] = err
 		case strings.HasPrefix(name, "Argo."):
 			argo.Err[strings.TrimPrefix(name, "Argo.")] = err
-		case strings.HasPrefix(name, "Kube."):
-			kube.Err[strings.TrimPrefix(name, "Kube.")] = err
+		case name == "Autoscaling.IsAutoscaled":
+			autoscaling.Err = err
 		case name == "History":
 			hist.Err = err
 		}
 	}
-	return steps.Validate{Git: git, Argo: argo, Kube: kube, History: hist}, git
+	return steps.Validate{Git: git, Argo: argo, Autoscaling: autoscaling, History: hist}, git
 }
 
 func TestValidate(t *testing.T) {
@@ -167,6 +167,10 @@ func TestValidate_Errors(t *testing.T) {
 			world: world{tag: "a1b2c3d", argo: healthy, errs: map[string]error{"Argo.Get": steps.ErrNotFound}}, wantNotFound: true, wantIn: "reconcile-dev"},
 		{name: "autoscaled app cannot be scaled", req: scaleReq(5),
 			world: world{replicas: "3", argo: healthy, autoscaled: true}, wantIn: "HPA"},
+		{name: "autoscaling reader transient error", req: scaleReq(5),
+			world: world{replicas: "3", errs: map[string]error{"Autoscaling.IsAutoscaled": retryable}}, wantRetryable: true},
+		{name: "autoscaling reader permanent error", req: scaleReq(5),
+			world: world{replicas: "3", errs: map[string]error{"Autoscaling.IsAutoscaled": errors.New("forbidden")}}, wantIn: "forbidden"},
 		{name: "app without replicasKey cannot be scaled", req: noScaleKey,
 			world: world{replicas: "3", argo: healthy}, wantIn: "does not support scale"},
 		{name: "negative replicas", req: scaleReq(-1),
@@ -195,6 +199,28 @@ func TestValidate_Errors(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantIn) {
 				t.Fatalf("error %q should mention %q", err, tt.wantIn)
+			}
+		})
+	}
+}
+
+func TestValidate_OptionalAutoscalingReader(t *testing.T) {
+	for _, req := range []steps.Request{deployReq("v2"), rollbackReq(), scaleReq(5)} {
+		t.Run(string(req.Kind), func(t *testing.T) {
+			v, git := world{tag: "v1", replicas: "3", argo: healthy, history: []string{"v0"}}.validate()
+			v.Autoscaling = nil
+			_, err := v.Run(context.Background(), steps.Input{Request: req})
+			if req.Kind != steps.KindScale {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "no autoscaling reader") || steps.IsRetryable(err) {
+				t.Fatalf("scale without HPA reader: %v", err)
+			}
+			if len(git.Commits) != 0 {
+				t.Fatal("validation wrote Git")
 			}
 		})
 	}

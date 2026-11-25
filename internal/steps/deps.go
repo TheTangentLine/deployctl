@@ -73,12 +73,47 @@ type ArgoClient interface {
 // --------------------------- Kubernetes (read-only) ---------------------------
 
 type Pod struct {
+	UID            string // instance identity, distinct from the reusable name
+	Name           string
+	Ready          bool
+	Terminating    bool        // deletion timestamp is set; independent of Ready
+	Owner          *ObjectRef  // controller owner only, usually a ReplicaSet
+	Phase          string      // Pending, Running, ...
+	Reason         string      // CrashLoopBackOff, ImagePullBackOff, ... (empty if none)
+	Restarts       int32       // sum across regular and init containers
+	Images         []string    // full image references of the pod's containers
+	Containers     []Container // regular containers, including sidecars, in spec order
+	InitContainers []Container // kept separate from desired regular-container images
+}
+
+// ObjectRef identifies the controller that owns a pod, without Kubernetes types.
+type ObjectRef struct {
+	Kind string
+	Name string
+	UID  string
+}
+
+type ContainerState string
+
+const (
+	ContainerUnknown    ContainerState = "Unknown"
+	ContainerWaiting    ContainerState = "Waiting"
+	ContainerRunning    ContainerState = "Running"
+	ContainerTerminated ContainerState = "Terminated"
+)
+
+// Container pairs spec identity/image with the status for that container name.
+// Missing status means Unknown, not ready and zero restarts. ImageID is the
+// runtime's unmodified image identity, which may be empty before startup.
+type Container struct {
 	Name     string
+	Image    string
+	ImageID  string
 	Ready    bool
-	Phase    string // Pending, Running, ...
-	Reason   string // CrashLoopBackOff, ImagePullBackOff, ... (empty if none)
 	Restarts int32
-	Images   []string // full image references of the pod's containers
+	State    ContainerState
+	Reason   string
+	Message  string
 }
 
 type Event struct {
@@ -90,10 +125,19 @@ type Event struct {
 
 type KubeReader interface {
 	Pods(ctx context.Context, namespace, selector string) ([]Pod, error)
+	// Events returns newest-first Pod/ReplicaSet events matching object names.
+	// limit must be positive; an empty objects list returns no events.
+	// Object UIDs are not accepted: recreated objects with the same name overlap.
 	Events(ctx context.Context, namespace string, objects []string, limit int) ([]Event, error)
+	// Logs reads one current/previous container instance without following.
+	// tailLines must be positive; the returned text is capped at 64 KiB.
 	Logs(ctx context.Context, namespace, pod, container string, previous bool, tailLines int64) (string, error)
+}
+
+// AutoscalingReader is a separate scale capability. Its real Kubernetes
+// implementation is deferred to M5; the M0 KubeReader does not imply HPA access.
+type AutoscalingReader interface {
 	// IsAutoscaled reports whether an HPA targets the workload behind selector.
-	// Only needed for scale (M5); can be added later.
 	IsAutoscaled(ctx context.Context, namespace, selector string) (bool, error)
 }
 

@@ -168,6 +168,11 @@ At startup the service validates the config and **refuses to start** on any erro
 | `DEPLOYCTL_LOG_LEVEL` | all | `debug`, `info` (default), `warn`, `error`. *(proposed)* |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | api, worker | Standard OpenTelemetry exporter settings. |
 
+The kube client loads the explicit `KUBECONFIG` path (or OS-separated path list)
+and returns an error for missing, malformed or unusable files. Without a value it
+uses in-cluster credentials; it does not search `~/.kube/config`. API/worker wiring
+is planned for M1; the M0 client exposes `kube.LoadConfig` and `kube.NewForConfig`.
+
 `deployctl api` refuses to start if any `DEPLOYCTL_GITHUB_APP_*` variable is set, to keep write credentials out of the API process. *(proposed)*
 
 ## Mapping to the config repo
