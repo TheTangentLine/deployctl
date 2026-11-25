@@ -81,7 +81,7 @@ Terms used across the docs, with the chapter of the [story track](README.md) whe
 | **Step** | One unit of work in a request: `validate`, `approval_gate`, `git_commit`, `argocd_refresh`, `wait_healthy`, `finalize`. | 7 |
 | **`sub` (subject)** | The identity provider's stable, unique user ID. | 5 |
 | **Sync / sync status** | Argo CD applying Git to the cluster; whether they match (`Synced`, `OutOfSync`). | 4 |
-| **Sync revision** | The Git commit Argo CD last synced. | 4 |
+| **Sync revision** | The Git revision Argo CD used for its latest comparison with the cluster; not proof of a successful rollout. | 4 |
 | **Tag** | A human-readable, movable label for an image version. | 2 |
 | **Threat model** | A structured list of what could go wrong security-wise, its impact and its controls. | 6 |
 | **Trailer** | A `Key: value` line at the end of a Git commit message. | 7 |

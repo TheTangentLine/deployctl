@@ -11,7 +11,7 @@ Done when:
 - [ ] `internal/git` can clone, read a value, edit it with the node API, commit with trailers, push, and find a commit by trailer, against a local bare repo.
 - [ ] YAML golden tests pass, including comments, indentation and numeric-looking tags.
 - [ ] `internal/argocd` reads sync status, revision and health, and refreshes.
-- [ ] `internal/kube` lists pods by selector, reads events and log tails.
+- [x] `internal/kube` lists pods by selector, reads events and log tails.
 - [ ] Every step has table tests with fakes, including a re-run after "crash".
 
 ## M1: API and worker
@@ -65,6 +65,7 @@ The remaining request kinds and the deployment history.
 Done when:
 
 - [ ] `scale` edits `replicasKey`, refuses when an HPA targets the workload, and waits for the right ready count.
+- [ ] Implement the real `steps.AutoscalingReader` HPA lookup; M0 only defines the separate capability and a fake for scale validation.
 - [ ] `finalize` records `deployments`; `rollback` picks the last good tag that differs from Git.
 - [ ] A failed deploy followed by a rollback ends with the previous tag running.
 

@@ -297,22 +297,141 @@ type Repo interface {
 // internal/argocd
 type Client interface {
     Get(ctx context.Context, app string, refresh bool) (AppState, error)
+    // Desired images are read separately from the application status snapshot.
+    GetDesiredImages(ctx context.Context, app, revision, namespace, selector string) (map[string]string, error)
+    Sync(ctx context.Context, app, revision string) error
 }
 
 type AppState struct {
     SyncStatus   string // Synced, OutOfSync, Unknown
-    SyncRevision string // commit SHA Argo CD last synced
+    SyncRevision string // Git revision used for the latest comparison
     Health       string // Healthy, Progressing, Degraded, Suspended, Missing, Unknown
-    OperationPhase string
+    AutoSync     bool   // whether automated sync is enabled
+    Operation    *SyncOperationState // pending, active or latest sync; nil if unknown
 }
 
-// internal/kube
-type Reader interface {
+type SyncOperationState struct {
+    Revision string // resolved Git SHA, or requested revision if unresolved (may be empty)
+    Phase    string // Pending, Running, Terminating, Succeeded, Failed, Error
+    Message  string // operation details or failure reason
+}
+
+// internal/steps: implemented by internal/kube
+type KubeReader interface {
     Pods(ctx context.Context, namespace, selector string) ([]Pod, error)
-    Events(ctx context.Context, namespace string, involved []string) ([]Event, error)
-    Logs(ctx context.Context, namespace, pod, container string, tailLines int64) (string, error)
+    Events(ctx context.Context, namespace string, objects []string, limit int) ([]Event, error)
+    Logs(ctx context.Context, namespace, pod, container string, previous bool, tailLines int64) (string, error)
+}
+
+// Separate capability for scale. Real Kubernetes implementation: M5.
+type AutoscalingReader interface {
+    IsAutoscaled(ctx context.Context, namespace, selector string) (bool, error)
 }
 ```
+
+`steps.Pod` is a read-only snapshot with UID, readiness, phase, terminating
+state and a controller `Owner` reference (kind, name, UID; nil if absent).
+`Containers` and `InitContainers` preserve spec order separately. Each container
+records name, spec image, unmodified runtime image ID, readiness, restart count,
+state (`Unknown`, `Waiting`, `Running`, `Terminated`), reason and message.
+Missing status means Unknown, not ready and zero restarts. `Images` contains only
+regular-container spec images; `Restarts` totals regular and init containers.
+Snapshot readiness and termination are independent; the consumer checks both.
+
+`Validate` needs `AutoscalingReader` only for scale and fails when it is absent.
+Deploy and rollback do not need it. M0 tests use `fakes.Autoscaling`, independently
+of `fakes.Kube`; the latter returns independent deep copies of scripted pod
+snapshots and keeps returning the last snapshot after the script ends.
+
+The read-only `kube.Client` is constructed with `New(kubernetes.Interface)` for
+injection, or `NewForConfig(*rest.Config)` for a real cluster. `LoadConfig` loads
+explicit `KUBECONFIG` paths, otherwise in-cluster credentials; it never falls back
+to `~/.kube/config`. Invalid explicit configuration is an error. Constructors do
+not modify the caller's config. Reads have a 30-second maximum per operation
+(across all list pages), bounded further by the caller's context/config timeout.
+The wrapper does not implement worker retry/backoff logic.
+
+`Pods` requires a namespace and a non-empty valid Kubernetes selector. It lists
+all pages, returns snapshots sorted by name, and includes terminating pods.
+`Ready` comes from the PodReady condition, not the Running phase. Container
+statuses are joined to spec entries by name; status-only entries are ignored.
+Pod reason prefers `status.reason`, then the first non-ready container reason
+(init containers before regular containers). No matched pods is an empty result,
+not evidence that the namespace is missing.
+
+Kubernetes 404 errors wrap `steps.ErrNotFound`; 429, 5xx, temporary transport errors
+and client-imposed timeouts are retryable. Invalid inputs, authentication and
+authorization failures are permanent. Caller cancellation/deadline errors are
+preserved and are not retryable. Original causes remain available via errors.Is/As.
+
+`Events` requires a namespace, non-empty names in `objects`, and a positive limit.
+An empty objects list returns no events without an API call. It reads all pages
+of core/v1 namespace events, keeps only Pod/ReplicaSet events matching the names,
+then applies the limit after sorting newest first. The observation time is the
+maximum of series.lastObservedTime, lastTimestamp, eventTime and creationTimestamp;
+ties sort by event name. The interface does not accept object UIDs, so events
+for an older object with a reused name may also match. The fake's EventList
+contains already ordered Pod/ReplicaSet fixtures.
+
+`Logs` requires namespace, pod, container and positive tailLines. It reads exactly
+the requested current/previous container instance, without following, retrying
+the log request, or falling back from previous to current logs. It closes the
+stream on success, truncation, cancellation and read failure. Returned text is
+the first 64 KiB of the requested tail at most; truncation is byte-based and can
+split a line or UTF-8 character. There is no truncation flag in this interface.
+The future wait_healthy step chooses 20 events and 50 lines per non-ready
+container, and separately enforces the combined 64 KiB/request diagnostics cap.
+
+`steps.ArgoClient.GetDesiredImages` reads rendered manifests at the supplied full Git
+commit SHA, independently of `AppState`. In M0 it supports applications with one
+Git source and exactly one Deployment matching the namespace and pod-template
+label selector. It returns full image references keyed by container name from
+`spec.template.spec.containers`, including sidecars in that list and excluding
+init containers. It does not use `status.summary.images`. Zero or multiple matching
+Deployments, or unsupported configuration, are permanent errors; a missing
+application wraps `steps.ErrNotFound`.
+
+The M0 client accepts a full 40-character Git SHA. It reads the Application's
+effective source (`sources` takes precedence over `source`) and destination
+namespace before requesting manifests. A single entry in `sources` is pinned
+using `sourcePositions=1` and `revisions=<SHA>` in addition to `revision=<SHA>`.
+Argo CD v3.6.2's endpoint returns only the combined manifests, without a resolved
+revision; the request pins the SHA. If a server includes a non-empty revision,
+the client checks that it matches. See the [v3.6.2 implementation](https://github.com/argoproj/argo-cd/blob/v3.6.2/server/application/application.go#L464-L618).
+
+Deployment selection uses Kubernetes label-selector syntax on pod-template
+labels. An omitted manifest namespace uses the Application's destination
+namespace; an unresolved namespace is an error. Only `apps/v1` Deployments are
+supported; `List`/`DeploymentList` wrappers, source hydration and reference-only
+sources are unsupported. Git-hosted Helm charts are supported; Helm repository
+and OCI sources are not. Regular containers require non-empty, unique names
+and non-empty images. Each call returns a new map.
+
+`AppState.Operation` describes a sync independently of comparison status and
+health. The client maps Argo CD's `operation.sync` and `status.operationState`:
+
+- A requested sync without a matching active operation state is `Pending`.
+  Use the requested revision and an empty message, ignoring a previous completed
+  operation even if it has the same revision.
+- An active state matches only when its phase is `Running` or `Terminating` and
+  its `operation.sync.revision` equals the current request's `operation.sync.revision`,
+  including empty revisions. Do not compare against the resolved revision.
+- A matching active operation or the latest recorded sync uses the phase and
+  message from `status.operationState`. Prefer a non-empty `syncResult.revision`; otherwise,
+  use `operation.sync.revision` from that same operation state.
+- Without a current sync request, a recorded state needs a non-empty phase and
+  either `operation.sync` or `syncResult`; otherwise return `nil`. An unresolved
+  revision may be a branch, tag or empty; never substitute `AppState.SyncRevision`.
+
+Consumers must match the operation revision to the request before interpreting
+its phase. `Succeeded` describes the sync operation, not rollout health. This
+snapshot helps reconcile retries but does not guarantee exactly-once sync calls.
+
+`Client.Sync` sends one request for the supplied revision; success means the API
+accepted it. The caller decides when to inspect `Get` again. The client does not
+poll or resend the request. For Argo CD v3.6.2, HTTP 400 with gRPC code 9 and the
+exact message `another operation is already in progress` is retryable; other
+errors retain the shared client classification.
 
 ## Scaling characteristics
 
