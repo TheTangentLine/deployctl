@@ -1,6 +1,6 @@
 # Architecture
 
-> **Status:** design. Nothing here is implemented yet. Where this document goes beyond the original README (lease timings, notification channel names, deployment topology), the detail is a proposal and is marked as such.
+> **Status:** M0 is implemented: the steps and the Git, GitHub App, Argo CD and Kubernetes clients, tested with fakes. The API, worker, store, auth and CLI are the design for M1 onward. Where this document goes beyond the original README (lease timings, notification channel names, deployment topology), the detail is a proposal and is marked as such.
 
 This document describes the components of deployctl, what each one is allowed to do, how they talk to each other, and how the code is organised. Read it first; the other reference documents assume you know the four boxes described here.
 
@@ -203,22 +203,26 @@ Bootstrapping note: deployctl cannot deploy itself on day one. Its own manifests
 
 ```
 deployctl/
-├── cmd/deployctl/main.go      # mode dispatch: api | worker | migrate | client commands
+├── cmd/
+│   ├── deployctl/main.go      # (M1) mode dispatch: api | worker | migrate | client commands
+│   └── ghcheck/               # read-only check of a GitHub App setup
 ├── internal/
-│   ├── api/                   # HTTP handlers, middleware, SSE hub
-│   ├── auth/                  # OIDC verification, role mapping, policy.go
-│   ├── worker/                # claim loop, leases, heartbeats, dispatch to steps
-│   ├── steps/                 # validate, approval_gate, git_commit, argocd_refresh, wait_healthy, finalize
-│   ├── store/                 # Postgres access (pgx), queries, transactions
-│   ├── git/                   # clone/fetch, YAML node editing, commit, push, trailer search
-│   ├── argocd/                # Argo CD REST client
+│   ├── steps/                 # validate, approval_gate, git_commit, argocd_refresh, wait_healthy, finalize;
+│   │                          #   the interfaces they need (deps.go) and fakes/ for tests
+│   ├── git/                   # go-git cached clone, YAML value editing, commit, push, trailer search
+│   ├── githubapp/             # GitHub App installation tokens
+│   ├── argocd/                # Argo CD REST client: state, refresh, sync, desired images
 │   ├── kube/                  # read-only client-go wrapper: pods, events, logs
-│   ├── audit/                 # audit event construction and writing
-│   ├── config/                # YAML config load and validation
-│   └── client/                # CLI: API client, OIDC login (PKCE), token storage, rendering
-├── migrations/                # numbered SQL migrations
-├── deployctl.config.example.yaml
-├── docker-compose.yaml        # Postgres and a dev identity provider
+│   ├── archtest/              # tests that enforce the dependency rules below
+│   ├── api/                   # (M1) HTTP handlers, middleware, SSE hub
+│   ├── auth/                  # (M2) OIDC verification, role mapping, policy.go
+│   ├── worker/                # (M1) claim loop, leases, heartbeats, dispatch to steps
+│   ├── store/                 # (M1) Postgres access (pgx), queries, transactions
+│   ├── audit/                 # (M3) audit event construction and writing
+│   ├── config/                # (M1) YAML config load and validation
+│   └── client/                # (M4) CLI: API client, OIDC login (PKCE), token storage, rendering
+├── migrations/                # (M1) numbered SQL migrations
+├── docker-compose.yaml        # (M1) Postgres; (M2) a dev identity provider
 ├── Makefile
 └── go.mod
 ```
@@ -235,67 +239,79 @@ flowchart TD
     APIPKG --> AUDIT["internal/audit"]
     APIPKG -.->|read only| ARGO
     APIPKG -.->|read only| KUBE
-    WORKER --> STEPS["internal/steps"]
     WORKER --> STORE
-    STEPS --> GIT["internal/git"]
-    STEPS --> ARGO["internal/argocd"]
-    STEPS --> KUBE["internal/kube"]
-    STEPS --> AUDIT
+    WORKER --> STEPS["internal/steps"]
+    WORKER -->|wires| GIT["internal/git"]
+    WORKER -->|wires| GHAPP["internal/githubapp"]
+    WORKER -->|wires| ARGO["internal/argocd"]
+    WORKER -->|wires| KUBE["internal/kube"]
+    GIT -->|implements GitRepo| STEPS
+    ARGO -->|implements ArgoClient| STEPS
+    KUBE -->|implements KubeReader| STEPS
     AUDIT --> STORE
 ```
 
-- `internal/api` must **not** import `internal/git`. A lint rule (`depguard`) enforces this, so the "API cannot write to Git" property is checked at build time, not just by credential separation. *(proposed)*
-- `internal/client` imports nothing server-side except shared request and response types.
-- `internal/steps` depends on interfaces, not concrete clients, so every step is testable without a network.
+- `internal/steps` defines the small interfaces it needs (`deps.go`) and imports **no** client package, no store and no worker. The clients import `steps` to implement those interfaces and to share its types and error classes. Every step is testable without a network.
+- `internal/git`, `internal/githubapp`, `internal/argocd` and `internal/kube` do not import each other. The worker wires a GitHub App token source into Git with `git.TokenAuth`.
+- `internal/api` must **not** depend on `internal/git` or `internal/githubapp`, so the "API cannot write to Git" property is checked at build time, not just by credential separation.
+- `internal/client` imports nothing server-side except shared request and response types *(proposed)*.
+
+The first three rules are enforced by `internal/archtest`, which fails `make check` when a forbidden import appears, directly or transitively. The `internal/api` rule is already in the table and starts applying when the package exists.
 
 ## Key interfaces
 
-These are sketches to fix the shape of the boundaries; names may change during M0.
+The authoritative definitions are in `internal/steps/step.go` (the step contract) and `internal/steps/deps.go` (what steps need from the outside). This is a summary.
 
 ```go
-// internal/steps
+// internal/steps: the step contract
 
-// Step is one unit of work inside a request. Run must be idempotent:
-// calling it again after a crash, with the same inputs, must converge
-// to the same outcome without repeating side effects.
 type Step interface {
     Name() string
     Run(ctx context.Context, in Input) (Result, error)
 }
 
 type Input struct {
-    Request   store.Request    // kind, app, env, params, requester
-    App       config.App       // resolved app and environment config
-    Attempt   int              // 1 on first run
-    Previous  map[string]any   // outputs of earlier steps (e.g. commit SHA)
+    Request        Request      // kind, app, environment, tag or replicas, requester, approver,
+                                // and the Target snapshot (repo, branch, values file, keys,
+                                // Argo CD application, namespace, label selector, requiresApproval)
+    Outputs        Outputs      // what earlier steps learned
+    Attempt        int          // 1 on the first run, higher on retry or reclaim
+    FirstStartedAt time.Time    // across attempts; wait_healthy's timeout starts here
+    Progress       func(string) // one-line status while running; use in.Report
+}
+
+type Outputs struct {
+    From, To    string       // set by validate
+    Warnings    []string     // set by validate
+    CommitSHA   string       // set by git_commit
+    Diagnostics *Diagnostics // set by wait_healthy on failure
+    Deployment  *Deployment  // set by finalize for deploy and rollback
 }
 
 type Result struct {
-    Outcome Outcome            // Succeeded, Skipped, Waiting, NoChange
-    Output  map[string]any     // persisted in steps.output, visible to later steps
-    Message string             // one line for the CLI
+    Outcome Outcome // Succeeded, Skipped, NoChange (validate only), Waiting (approval_gate only)
+    Outputs Outputs // in.Outputs plus this step's additions; stored even when Run fails
+    Message string  // one line for the CLI
 }
 
 // Errors returned from Run are classified:
-//   errors.As(err, &Retryable{})  -> step is retried with backoff
-//   anything else                 -> step and request fail
+//   steps.IsRetryable(err)          -> step is retried with backoff
+//   anything else                   -> step and request fail
+//   errors.Is(err, steps.ErrNotFound) marks a missing object (wraps 404s)
 ```
 
+**Steps never touch the database.** `Run` gets everything in `Input` and returns everything in `Result`; the worker stores it. Where a step's result needs a database change, the step says so in its result and the worker makes the change in the same transaction that completes the step: `Waiting` creates the pending approval, and `Outputs.Deployment` is inserted into `deployments`. `Run` must be idempotent: called again with the same input after a crash, it converges without repeating side effects.
+
 ```go
-// internal/git
-type Repo interface {
-    // SetValue sets key (dotted path) in file to value on branch, commits with
-    // msg and pushes. It returns changed=false if the value was already set.
-    SetValue(ctx context.Context, file, key, value string, msg Commit) (sha string, changed bool, err error)
-    // FindRequestCommit looks for a commit on branch whose trailer is
-    // "Deployctl-Request: <id>", within the last N commits.
-    FindRequestCommit(ctx context.Context, requestID string) (sha string, found bool, err error)
-    // GetValue reads the current value at key on the tip of branch.
-    GetValue(ctx context.Context, file, key string) (string, error)
+// internal/steps/deps.go: implemented by internal/git
+type GitRepo interface {
+    GetValue(ctx context.Context, ref ValueRef) (string, error)
+    SetValue(ctx context.Context, ref ValueRef, value string, kind ValueKind, msg CommitMessage) (sha string, changed bool, err error)
+    FindRequestCommit(ctx context.Context, repo, branch, requestID string) (sha string, found bool, err error)
 }
 
-// internal/argocd
-type Client interface {
+// implemented by internal/argocd
+type ArgoClient interface {
     Get(ctx context.Context, app string, refresh bool) (AppState, error)
     // Desired images are read separately from the application status snapshot.
     GetDesiredImages(ctx context.Context, app, revision, namespace, selector string) (map[string]string, error)
@@ -303,11 +319,12 @@ type Client interface {
 }
 
 type AppState struct {
-    SyncStatus   string // Synced, OutOfSync, Unknown
-    SyncRevision string // Git revision used for the latest comparison
-    Health       string // Healthy, Progressing, Degraded, Suspended, Missing, Unknown
-    AutoSync     bool   // whether automated sync is enabled
-    Operation    *SyncOperationState // pending, active or latest sync; nil if unknown
+    SyncStatus    string              // Synced, OutOfSync, Unknown
+    SyncRevision  string              // Git revision used for the latest comparison
+    Health        string              // Healthy, Progressing, Degraded, Suspended, Missing, Unknown
+    HealthMessage string
+    AutoSync      bool                // whether automated sync is enabled
+    Operation     *SyncOperationState // pending, active or latest sync; nil if unknown
 }
 
 type SyncOperationState struct {
@@ -316,7 +333,7 @@ type SyncOperationState struct {
     Message  string // operation details or failure reason
 }
 
-// internal/steps: implemented by internal/kube
+// implemented by internal/kube
 type KubeReader interface {
     Pods(ctx context.Context, namespace, selector string) ([]Pod, error)
     Events(ctx context.Context, namespace string, objects []string, limit int) ([]Event, error)
@@ -327,7 +344,14 @@ type KubeReader interface {
 type AutoscalingReader interface {
     IsAutoscaled(ctx context.Context, namespace, selector string) (bool, error)
 }
+
+// Read by validate for rollback; backed by the deployments table (M1/M5).
+type History interface {
+    LastGoodTag(ctx context.Context, app, environment, exclude string) (tag string, found bool, err error)
+}
 ```
+
+`internal/git` is a go-git implementation with one cached clone per repository URL. `SetValue` edits the value with `git.SetYAMLValue` (see [development.md](development.md#editing-yaml-safely)), commits with the trailers from [request-lifecycle.md](request-lifecycle.md#git_commit), pushes, and on a non-fast-forward re-fetches and re-applies, up to 5 attempts. `FindRequestCommit` searches the last 200 commits. Push rejections from branch protection (`GH006`, `GH013`) are permanent; network errors and GitHub 5xx are retryable. Credentials come from an `AuthFunc` called before every clone, fetch and push, so short-lived installation tokens from `internal/githubapp` refresh themselves.
 
 `steps.Pod` is a read-only snapshot with UID, readiness, phase, terminating
 state and a controller `Owner` reference (kind, name, UID; nil if absent).
@@ -379,8 +403,8 @@ the log request, or falling back from previous to current logs. It closes the
 stream on success, truncation, cancellation and read failure. Returned text is
 the first 64 KiB of the requested tail at most; truncation is byte-based and can
 split a line or UTF-8 character. There is no truncation flag in this interface.
-The future wait_healthy step chooses 20 events and 50 lines per non-ready
-container, and separately enforces the combined 64 KiB/request diagnostics cap.
+`wait_healthy` asks for 20 events and 50 lines per non-ready container (at most 3
+containers), and separately enforces the combined 64 KiB/request diagnostics cap.
 
 `steps.ArgoClient.GetDesiredImages` reads rendered manifests at the supplied full Git
 commit SHA, independently of `AppState`. In M0 it supports applications with one

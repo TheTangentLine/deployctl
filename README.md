@@ -2,7 +2,7 @@
 
 A small, shared deployment service for GitOps. Developers ask for a deploy, a scale or a rollback through a CLI (or the API). The service checks who they are and what they may do, records the request, then carries it out by committing to Git and letting Argo CD apply it.
 
-> **Status:** early design. Nothing is implemented yet. The [docs](docs/) describe the intended behaviour.
+> **Status:** M0 done: the six steps and the Git, GitHub App, Argo CD and Kubernetes clients exist and are tested with fakes. There is no server yet, so nothing below runs end to end; that is M1. The [docs](docs/) describe the intended behaviour.
 
 ```bash
 $ deployctl deploy backend --env dev --tag e4f5a6b
@@ -10,7 +10,7 @@ $ deployctl deploy backend --env dev --tag e4f5a6b
 ✔ validate        a1b2c3d → e4f5a6b
 ✔ git_commit      pushed 3c2d1e0
 ✔ argocd_refresh
-✔ wait_healthy    3/3 pods ready
+✔ wait_healthy    3/3 pods ready on e4f5a6b
 ✔ Deployed in 48s
 ```
 

@@ -122,14 +122,14 @@ App names: lowercase letters, digits and `-`, up to 63 characters.
 | `maxReplicas` | Upper bound for `scale` (default 50). *(proposed)* |
 | `git.repo` | HTTPS URL of the config repo. The GitHub App must be installed on it. |
 | `git.branch` | Branch Argo CD tracks. |
-| `git.imageTagKey` | Dotted path to the image tag inside the values file. |
+| `git.imageTagKey` | Dotted path to the image tag inside the values file. It must set the image tag of the app's main container in the Deployment that `kube.labelSelector` matches; `wait_healthy` looks for that tag. |
 | `git.replicasKey` | Dotted path to the replica count. Omit to disable `scale` for the app. |
 | `environments.<env>.valuesFile` | Path to that environment's values file, relative to the repo root. |
 | `environments.<env>.requiresApproval` | Whether requests need an approver. This, not the name, is what makes an environment "prod". |
 | `environments.<env>.argocd.application` | Argo CD `Application` name. |
 | `environments.<env>.argocd.project` | Argo CD project (default `default`). Used for RBAC object names. *(proposed)* |
 | `environments.<env>.kube.namespace` | Namespace where the pods run. |
-| `environments.<env>.kube.labelSelector` | Selector that matches exactly this app's pods. |
+| `environments.<env>.kube.labelSelector` | Selector that matches exactly this app's pods, and therefore exactly one Deployment (more than one is a permanent `wait_healthy` error). Two apps must not share a selector in one namespace. |
 
 Dotted paths: `backend.image.tag` means:
 

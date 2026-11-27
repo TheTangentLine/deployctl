@@ -192,7 +192,7 @@ CREATE TABLE steps (
     lease_expires_at timestamptz,
     first_started_at timestamptz,
     finished_at      timestamptz,
-    message          text,              -- one line for the CLI, e.g. "2/3 pods ready"
+    message          text,              -- one line for the CLI, e.g. "2/3 pods ready on e4f5a6b"
     last_error       text,
     output           jsonb NOT NULL DEFAULT '{}',
     updated_at       timestamptz NOT NULL DEFAULT now(),

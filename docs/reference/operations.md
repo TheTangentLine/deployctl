@@ -148,7 +148,11 @@ Not a fault. `deployctl approvals` as an approver shows it. If nobody with `appr
 
 ### Argo CD says Synced, but deployctl keeps waiting
 
-`wait_healthy` requires Argo CD's synced revision to be the request's commit or a descendant. If Argo CD tracks a different branch than `git.branch` in the config, it never will be. Compare `spec.source.targetRevision` with the config.
+`wait_healthy` requires Argo CD's synced revision to contain the change: it is the request's commit, or a later commit whose rendered Deployment still has the new image tag. The message `waiting for Argo CD to pick up <sha>` means neither is true yet. Common causes:
+
+- Argo CD tracks a different branch than `git.branch` in the config, so it never sees the commit. Compare `spec.source.targetRevision` with the config.
+- A later commit changed the same key again (someone edited the values file by hand). The request's change is no longer what Git says, and the step times out. Check `git log` on the values file.
+- The label selector or `imageTagKey` points at a different Deployment or container than the one the tag actually changes. See [configuration](configuration.md#field-reference).
 
 ### deployctl and Git disagree after a manual edit
 

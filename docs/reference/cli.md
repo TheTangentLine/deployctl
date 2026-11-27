@@ -75,7 +75,7 @@ deployctl deploy backend --env dev --tag e4f5a6b
 ✔ validate        a1b2c3d → e4f5a6b
 ✔ git_commit      pushed 3c2d1e0
 ✔ argocd_refresh
-⏳ wait_healthy    2/3 pods ready
+⏳ wait_healthy    2/3 pods ready on e4f5a6b
 ✔ Deployed in 48s
 ```
 
@@ -93,7 +93,7 @@ For environments that require approval, the CLI shows the pause and who can appr
 ```
 ✔ Request 0b8e created
 ✔ validate        9f8e7d6 → e4f5a6b
-⏸ approval_gate   waiting for approval
+⏸ approval_gate   waiting for approval: 9f8e7d6 → e4f5a6b
                   approvers: Priya, Sam (deployctl-approvers)
                   ask them to run: deployctl approve 9c41
 ```
@@ -103,7 +103,7 @@ It keeps following the stream. Ctrl-C detaches **without cancelling**; reattach 
 When a rollout fails, the CLI prints the diagnostics:
 
 ```
-✖ wait_healthy    timed out after 5m0s (1/3 pods ready)
+✖ wait_healthy    timed out after 5m0s (1/3 pods ready on e4f5a6b)
 
   Events (backend-7d9f8c-x2kq):
     Warning  BackOff   Back-off restarting failed container backend

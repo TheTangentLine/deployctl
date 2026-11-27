@@ -115,8 +115,7 @@ After lunch, Linh ships a second change: rounding mode should be configurable. C
 ✔ validate        e4f5a6b → f00ba47
 ✔ git_commit      pushed 8a9b0c1
 ✔ argocd_refresh
-⏳ wait_healthy    0/3 pods ready
-⏳ wait_healthy    0/3 pods ready (1 restarting)
+⏳ wait_healthy    0/4 pods ready on f00ba47
 ✖ wait_healthy    pod reconcile-backend-7d9f8c-x2kq restarted 3 times
 
   Events (reconcile-backend-7d9f8c-x2kq):
@@ -165,7 +164,7 @@ $ deployctl rollback backend --env dev
 ✔ validate        f00ba47 → e4f5a6b
 ✔ git_commit      pushed 9d8c7b6
 ✔ argocd_refresh
-✔ wait_healthy    3/3 pods ready
+✔ wait_healthy    3/3 pods ready on e4f5a6b
 ✔ Rolled back in 21s
 ```
 

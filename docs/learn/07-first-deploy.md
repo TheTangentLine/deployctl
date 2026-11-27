@@ -10,7 +10,7 @@ $ deployctl deploy backend --env dev --tag e4f5a6b
 ✔ validate        a1b2c3d → e4f5a6b
 ✔ git_commit      pushed 3c2d1e0
 ✔ argocd_refresh
-⏳ wait_healthy    2/3 pods ready
+⏳ wait_healthy    2/3 pods ready on e4f5a6b
 ✔ Deployed in 48s
 ```
 
@@ -212,9 +212,9 @@ Argo CD fetches `main`, sees `3c2d1e0`, renders the Helm chart with the new valu
 Now the worker watches. Every 5 seconds, until success or a 5-minute timeout, it checks five things:
 
 1. Argo CD says `Synced`...
-2. ...**at revision `3c2d1e0`** (or something newer).
+2. ...**at revision `3c2d1e0`**, or at a newer commit that still deploys `e4f5a6b` (someone else's deploy may have landed right after Linh's).
 3. Argo CD says `Healthy`.
-4. Every pod matching `app=reconcile-backend` in `demo-dev` is ready.
+4. Every pod matching `app=reconcile-backend` in `demo-dev` is ready (old pods that are shutting down don't count).
 5. Every one of those pods runs image tag `e4f5a6b`.
 
 Check 2 is the subtle one. In the first second after the push, before Argo CD has even noticed the new commit, it reports `Synced` and `Healthy`, about the **old** commit. A naive tool would declare victory right there, before anything happened. Checking the revision rules that out. Check 5 rules out the same mistake from the Kubernetes side.
@@ -233,7 +233,7 @@ reconcile-backend-7f5d6c8b9-r8n3v     0/1     ContainerCreating   3s     ← new
 Each poll, the worker updates the step's message, which flows to the CLI:
 
 ```
-⏳ wait_healthy    2/3 pods ready
+⏳ wait_healthy    2/3 pods ready on e4f5a6b
 ```
 
 At second 48, all three pods are new and ready, Argo CD is `Synced` at `3c2d1e0` and `Healthy`.

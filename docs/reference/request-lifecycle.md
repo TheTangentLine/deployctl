@@ -1,6 +1,6 @@
 # Request lifecycle
 
-> **Status:** design. This is the normative description of how a request moves from "accepted" to "done". Details beyond the original README (step statuses, lease timings, retry limits, the `no_change` outcome) are proposals and are marked *(proposed)* where they introduce a number or a new rule.
+> **Status:** normative. The steps (`validate`, `approval_gate`, `git_commit`, `argocd_refresh`, `wait_healthy`, `finalize`) are implemented in `internal/steps` (M0) and match this document. The worker loop, leases, retries, cancel and the API side are the design for M1 and later. Details beyond the original README (step statuses, lease timings, retry limits, the `no_change` outcome) are marked *(proposed)* where they introduce a number or a new rule.
 
 - [Overview](#overview)
 - [Request kinds](#request-kinds)
@@ -199,14 +199,18 @@ Rules:
 
 ### `approval_gate`
 
-Production only. Creates an `approvals` row with status `pending`, sets the step to `waiting` and the request to `awaiting_approval`, all in one transaction. The worker then **releases** the step; no worker is occupied while a human decides.
+Production only (environments with `requiresApproval: true`). It sits between `validate` and `git_commit`.
 
-The API's decision endpoint completes the gate:
+Like every step, it does not touch the database. `Run` checks that `validate` has run and that the environment really requires approval, then returns the outcome `waiting` with a message such as `waiting for approval: 9f8e7d6 → e4f5a6b (1 warning)`. The worker acts on that outcome in one transaction: it creates an `approvals` row with status `pending`, sets the step to `waiting` and the request to `awaiting_approval`, and writes the `approval.requested` audit event. The worker then **releases** the step; no worker is occupied while a human decides.
+
+`Run` has no side effects, so a crash between `Run` and that transaction is harmless: the next attempt returns the same answer. If the request already carries an approver, `Run` returns `succeeded`.
+
+The API's decision endpoint completes the gate; `Run` is not called for the decision:
 
 - **approve:** approval `approved`, step `succeeded`, `git_commit` `ready`, request `running`, audit event, `NOTIFY` — one transaction.
 - **reject:** approval `rejected`, step `failed`, remaining steps `cancelled`, request `rejected`, audit event — one transaction.
 
-The decider must hold `approval:decide` and must not be the requester. See [Approvals](#approvals).
+The decider must hold `approval:decide` and must not be the requester. See [Approvals](#approvals). `git_commit` refuses to run for an environment that requires approval when the request has no approver, as defence in depth.
 
 ### `git_commit`
 
@@ -270,35 +274,49 @@ revision used for the latest comparison. It can point to the new commit while th
 application is still `OutOfSync`, so the revision alone does not prove a successful
 rollout.
 
-Success requires **all** of:
+Success requires **all** of these in the same poll:
 
 1. Argo CD `sync.status == Synced`.
-2. Argo CD `sync.revision` is `sha` **or a descendant of it** (another commit may have landed after ours; the worker checks ancestry in its clone). Without this check the step could pass on the *old* revision, which is also `Synced` and `Healthy` for a moment after the push.
-3. Argo CD `health.status == Healthy`.
-4. Kubernetes: every pod matched by `labelSelector` in the namespace is `Ready`, and none is terminating.
-5. For `deploy` and `rollback`: every matched pod's container image ends with `:<to>` (or the pods' image digest matches, if the chart pins digests).
-6. For `scale`: the number of ready pods equals `to`.
+2. Argo CD `health.status == Healthy`.
+3. **The synced revision contains our change.** Either it is `sha`, or (for `deploy` and `rollback`) the application's desired manifests at that revision still give the target Deployment's containers the image tag `to`. The worker reads those through Argo CD (`GetDesiredImages`), for the request's application, namespace and label selector. For `scale`, condition 5 is the evidence instead. Without this check the step could pass on the *old* revision, which is also `Synced` and `Healthy` for a moment after the push.
+4. Kubernetes: every pod matched by `labelSelector` in the namespace that is not terminating is `Ready`. Terminating pods (old pods being shut down) are ignored.
+5. For `deploy` and `rollback`: there is at least one such pod, and every one of them runs a container whose image tag is `to`. For `scale`: exactly `to` such pods exist (none when scaling to 0).
 
-Early failure *(proposed)*: if Argo CD reports `Degraded` with a progress deadline exceeded, or any matched pod has restarted 3 or more times since the step started (CrashLoopBackOff), fail without waiting for the timeout.
+Why condition 3 compares images rather than Git ancestry: the config repo is shared, so Argo CD often syncs a *later* commit than ours (another app's deploy, a person's chart edit) and may skip ours entirely. A later commit only counts if it still renders our tag. Ancestry would also accept a later commit that replaced our tag, and it would need a Git clone in this step.
+
+Condition 3 assumes the label selector matches exactly one Deployment (more than one is a permanent error) and that the image tag of its app container is the value at `imageTagKey`. Sidecars with their own images are fine. Two containers in one pod that both carry tags from the same build are not supported: a match on the other container would count. See [configuration](configuration.md#field-reference).
+
+**Fails early**, without waiting for the timeout, when:
+
+- Argo CD's operation for `sha` ended `Failed` or `Error` ("Argo CD could not apply …").
+- Argo CD reports `Degraded` at a revision that contains our change. `Degraded` before our change arrives is not our failure; deploying a fix to a broken app must work.
+- A pod running the new tag has restarted 3 or more times since the step first saw it (crash loop). Restarts from before the step started do not count.
+- New pods stay in `ErrImagePull`, `ImagePullBackOff`, `CreateContainerConfigError` or `CreateContainerError` for 3 polls in a row, or report `InvalidImageName` at all.
+
+Short Argo CD or Kubernetes outages are ridden out until the timeout. If the last poll before the timeout still failed with a retryable error, the step returns that error so the worker retries later; otherwise the timeout is a permanent failure.
 
 On failure, the step captures **diagnostics** into `steps.output.diagnostics`:
 
-- the last 20 Kubernetes events for the matched pods and their ReplicaSet,
-- the last 50 log lines of each non-ready container (the previous instance if it restarted),
-- the Argo CD health message.
+- the Argo CD health message,
+- up to 20 Kubernetes events for the failing pods (up to 3, new ones first) and their ReplicaSets,
+- the last 50 log lines of up to 3 non-ready containers of those pods (the previous instance if the container restarted).
 
-Diagnostics are capped at 64 KiB per request and are shown by `deployctl request <id>`. Logs can contain sensitive data, so diagnostics are visible only to roles that can deploy to that environment *(proposed)*.
+Diagnostics are capped at 64 KiB per request, filled in that order; a log cut to fit keeps its end, where the error usually is. They are shown by `deployctl request <id>`. Logs can contain sensitive data, so diagnostics are visible only to roles that can deploy to that environment *(proposed)*.
 
 `wait_healthy` failing does **not** roll back. The new tag is in Git and stays there until someone requests a rollback. See [ADR 0009](../adr/0009-no-automatic-rollback.md).
 
 ### `finalize`
 
-One transaction:
+Runs after `wait_healthy` succeeded. `Run` does not touch the database: for `deploy` and `rollback` it returns the deployment to record (`Outputs.Deployment`: app, environment, tag, commit SHA, request ID), and for `scale` it records nothing, because a replica count is not a rollback target. Its message is `deployed e4f5a6b at 3c2d1e0`, `rolled back to a1b2c3d at 4d5e6f7` or `scaled to 5`.
 
-- for `deploy` and `rollback`, insert into `deployments (app, environment, tag, commit_sha, request_id, deployed_at)`; the unique constraint on `request_id` makes a second run a no-op,
+The worker completes it in one transaction:
+
+- if `Outputs.Deployment` is set, insert it into `deployments (app, environment, tag, commit_sha, request_id, deployed_by, deployed_at)`, with `deployed_by` the requester; `ON CONFLICT (request_id) DO NOTHING` makes a second run a no-op,
 - mark the step `succeeded` and the request `succeeded` with `outcome = applied`,
 - insert the `request.succeeded` audit event,
 - `NOTIFY request_updated`.
+
+Because only `finalize` writes `deployments`, and it runs only after `wait_healthy`, a tag reaches the rollback history only once it has been proven healthy.
 
 ## The worker loop
 
@@ -430,7 +448,7 @@ Two layers, for two different failure windows. See [ADR 0008](../adr/0008-idempo
 ```
 event: snapshot
 id: 7
-data: {"id":"0b8e...","status":"running","version":7,"steps":[{"name":"validate","status":"succeeded","message":"a1b2c3d → e4f5a6b"},{"name":"git_commit","status":"succeeded","message":"pushed 3c2d1e0"},{"name":"argocd_refresh","status":"succeeded"},{"name":"wait_healthy","status":"running","message":"2/3 pods ready"},{"name":"finalize","status":"blocked"}]}
+data: {"id":"0b8e...","status":"running","version":7,"steps":[{"name":"validate","status":"succeeded","message":"a1b2c3d → e4f5a6b"},{"name":"git_commit","status":"succeeded","message":"pushed 3c2d1e0"},{"name":"argocd_refresh","status":"succeeded"},{"name":"wait_healthy","status":"running","message":"2/3 pods ready on e4f5a6b"},{"name":"finalize","status":"blocked"}]}
 ```
 
 - `id` is `requests.version`, incremented on every change.
@@ -439,7 +457,7 @@ data: {"id":"0b8e...","status":"running","version":7,"steps":[{"name":"validate"
 - A `: keepalive` comment is sent every 15 seconds so proxies do not close idle connections.
 - Reconnecting is trivial: the client reconnects and gets the latest snapshot. There is no event log to replay. See [ADR 0010](../adr/0010-sse-snapshots-for-progress.md).
 
-`wait_healthy` updates its step `message` (for example "2/3 pods ready") on each poll where the message changes, which bumps `version` and produces a snapshot.
+`wait_healthy` updates its step `message` (for example "2/3 pods ready on e4f5a6b") on each poll where the message changes, which bumps `version` and produces a snapshot.
 
 ## Worked example
 
@@ -454,7 +472,7 @@ A production deploy of `backend` from `9f8e7d6` to `e4f5a6b`, requested by Linh 
 | 10:14:30 | Priya (CLI) | approves | `running` | approval_gate `succeeded`, git_commit `ready` |
 | 10:14:31 | worker-a | claims git_commit, pushes `3c2d1e0` | `running` | git_commit `succeeded`, argocd_refresh `ready` |
 | 10:14:32 | worker-b | refresh | `running` | argocd_refresh `succeeded`, wait_healthy `ready` |
-| 10:14:32 | worker-b | polls | `running` | wait_healthy `running` ("0/5 ready") |
+| 10:14:32 | worker-b | polls | `running` | wait_healthy `running` ("0/5 pods ready on e4f5a6b, waiting for Argo CD to pick up 3c2d1e0") |
 | 10:15:20 | worker-b | Synced at `3c2d1e0`, Healthy, 5/5 ready on `:e4f5a6b` | `running` | wait_healthy `succeeded` |
 | 10:15:20 | worker-a | finalize | `succeeded` (`applied`) | finalize `succeeded` |
 
@@ -467,5 +485,5 @@ Audit events written: `request.created`, `approval.requested`, `approval.approve
 | Should approvals expire? An approval given on Monday for a deploy that runs on Friday is stale. | No expiry in v1. `git_commit` re-checks the current value, so a stale approval cannot clobber a newer change silently, but it can still ship an old tag. | First real production use. Likely: expire after 24 hours, configurable per environment. |
 | Should `validate` run again after approval? | No. `git_commit` re-reads the current value, and `wait_healthy` checks the result. | If warnings at approval time turn out to matter. |
 | Long `wait_healthy` holds a worker goroutine for up to `rolloutTimeout`. | Acceptable at this scale. | If many slow rollouts starve the queue. Then: make `wait_healthy` return `Waiting` with a `run_after` and re-claim per poll. |
-| `git` CLI or a pure Go library in the worker? | Shell out to `git` with a cached clone per worker. Simpler and matches what humans run. | If the container image size or process overhead becomes a problem. |
+| `git` CLI or a pure Go library in the worker? | Decided in M0: pure Go ([go-git](https://github.com/go-git/go-git)) with a cached clone per repository. No `git` binary in the image, and credentials are passed per operation instead of through a credential helper. | If go-git misbehaves with a hosting provider or a large repo. |
 | Diagnostics visibility | Developers and above for the environment. | If per-app permissions are added. |

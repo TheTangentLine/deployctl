@@ -193,7 +193,7 @@ The cluster matches Git exactly, but what Git describes is not working. Typicall
 <details>
 <summary>3. Right after deployctl pushes a commit, Argo CD shows <code>Synced</code> and <code>Healthy</code>. Is the deploy done?</summary>
 
-Not necessarily. Argo CD may not have seen the new commit yet, so `Synced` could refer to the previous commit. That is why deployctl also checks that Argo CD's sync revision is the commit it pushed (or a later one), and that the pods run the new tag.
+Not necessarily. Argo CD may not have seen the new commit yet, so `Synced` could refer to the previous commit. That is why deployctl also checks that Argo CD's sync revision is the commit it pushed (or a later one that still deploys the new tag), and that the pods run the new tag.
 </details>
 
 <details>

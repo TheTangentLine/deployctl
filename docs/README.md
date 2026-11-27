@@ -1,6 +1,6 @@
 # deployctl documentation
 
-> **Status:** deployctl is in the design stage. These documents describe intended behaviour. Nothing is implemented yet. Details marked *(proposed)* go beyond the original design and are open for review.
+> **Status:** M0 is implemented: the steps and the Git, GitHub App, Argo CD and Kubernetes clients (see the [roadmap](reference/roadmap.md)). The API, worker, store, auth and CLI are still design. Where a reference document describes something that exists, the code and the document must agree. Details marked *(proposed)* go beyond the original design and are open for review.
 
 The docs come in three parts. Pick the one that matches why you are here.
 

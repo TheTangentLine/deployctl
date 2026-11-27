@@ -8,11 +8,11 @@ Git, Argo CD and Kubernetes clients, the step implementations and the YAML edito
 
 Done when:
 
-- [ ] `internal/git` can clone, read a value, edit it with the node API, commit with trailers, push, and find a commit by trailer, against a local bare repo.
-- [ ] YAML golden tests pass, including comments, indentation and numeric-looking tags.
-- [ ] `internal/argocd` reads sync status, revision and health, and refreshes.
+- [x] `internal/git` can clone, read a value, edit it with the node API, commit with trailers, push, and find a commit by trailer, against a local bare repo.
+- [x] YAML edit tests pass, including comments, indentation and numeric-looking tags (table tests with the expected file inline; see [ADR 0011](../adr/0011-edit-yaml-with-the-node-api.md#amendment-locate-with-the-node-api-splice-the-bytes)).
+- [x] `internal/argocd` reads sync status, revision and health, and refreshes.
 - [x] `internal/kube` lists pods by selector, reads events and log tails.
-- [ ] Every step has table tests with fakes, including a re-run after "crash".
+- [x] Every step has table tests with fakes, including a re-run after "crash".
 
 ## M1: API and worker
 

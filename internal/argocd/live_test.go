@@ -19,7 +19,7 @@ import (
 // TestLiveRead exercises an explicitly configured Application without calling Sync.
 func TestLiveRead(t *testing.T) {
 	if os.Getenv("DEPLOYCTL_ARGOCD_SMOKE") != "1" {
-		t.Skip("set DEPLOYCTL_ARGOCD_SMOKE=1; see docs/reference/argocd-client.md")
+		t.Skip("set DEPLOYCTL_ARGOCD_SMOKE=1; see 'Argo CD smoke test' in docs/reference/development.md")
 	}
 	server := liveEnv(t, "DEPLOYCTL_ARGOCD_SERVER")
 	token := liveEnv(t, "DEPLOYCTL_ARGOCD_TOKEN")

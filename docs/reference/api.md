@@ -115,8 +115,8 @@ Errors never include stack traces or internal hostnames. Server errors (`500`) c
     { "name": "validate",       "status": "succeeded", "attempt": 1, "message": "9f8e7d6 → e4f5a6b", "started_at": "…", "finished_at": "…" },
     { "name": "approval_gate",  "status": "succeeded", "attempt": 1, "message": "approved by Priya" },
     { "name": "git_commit",     "status": "succeeded", "attempt": 1, "message": "pushed 3c2d1e0" },
-    { "name": "argocd_refresh", "status": "succeeded", "attempt": 1 },
-    { "name": "wait_healthy",   "status": "running",   "attempt": 1, "message": "3/5 pods ready" },
+    { "name": "argocd_refresh", "status": "succeeded", "attempt": 1, "message": "refreshed reconcile-prod" },
+    { "name": "wait_healthy",   "status": "running",   "attempt": 1, "message": "3/5 pods ready on e4f5a6b" },
     { "name": "finalize",       "status": "blocked",   "attempt": 0 }
   ]
 }

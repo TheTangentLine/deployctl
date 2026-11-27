@@ -10,7 +10,7 @@ The rounding fix (`e4f5a6b`) has been in dev for two days. QA is happy. It's tim
 $ deployctl deploy backend --env prod --tag e4f5a6b --reason "Fix rounding in invoice totals"
 ✔ Request 4a7c created
 ✔ validate        9f8e7d6 → e4f5a6b
-⏸ approval_gate   waiting for approval
+⏸ approval_gate   waiting for approval: 9f8e7d6 → e4f5a6b
                   approvers: Priya, Sam (deployctl-approvers)
                   ask them to run: deployctl approve 4a7c
 ```
@@ -93,7 +93,7 @@ $ deployctl request 4a7c --watch
 ✔ approval_gate   approved by Priya
 ✔ git_commit      pushed 6d5e4f3
 ✔ argocd_refresh
-✔ wait_healthy    5/5 pods ready
+✔ wait_healthy    5/5 pods ready on e4f5a6b
 ✔ Deployed in 49s (approval wait 14m)
 ```
 
@@ -134,7 +134,7 @@ Would roll back backend/prod: c0ffee1 → e4f5a6b
 $ deployctl rollback backend --env prod --reason "Wrong invoice matches after c0ffee1"
 ✔ Request 8b2a created
 ✔ validate        c0ffee1 → e4f5a6b
-⏸ approval_gate   waiting for approval
+⏸ approval_gate   waiting for approval: c0ffee1 → e4f5a6b
 ```
 
 This time the history has `c0ffee1` as its newest entry, because it *did* pass health checks. Rollback skips it because it equals what Git currently says, and picks `e4f5a6b`.
