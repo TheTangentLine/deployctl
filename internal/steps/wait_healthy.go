@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // WaitHealthy watches until the change is live and healthy, or fails with
@@ -335,14 +336,18 @@ const (
 	diagMaxEvents     = 20
 	diagMaxContainers = 3
 	diagTailLines     = 50
+	diagMaxBytes      = 64 << 10 // all diagnostics of one request together
 )
 
 // diagnose gathers what a person needs to see why the rollout failed. It is
 // best effort: a diagnostic that cannot be fetched is left out, it never
-// hides the real failure.
+// hides the real failure. Everything together stays within diagMaxBytes,
+// filled in order: health message, events, then log tails.
 func (s *watch) diagnose(ctx context.Context) *Diagnostics {
 	t := s.req.Target
-	d := &Diagnostics{HealthMessage: s.lastState.HealthMessage, Logs: map[string]string{}}
+	budget := diagMaxBytes
+	d := &Diagnostics{HealthMessage: keepHead(s.lastState.HealthMessage, budget), Logs: map[string]string{}}
+	budget -= len(d.HealthMessage)
 
 	// Pods that are not ready, new ones (this change's) first. A ready pod
 	// on the old tag is just the rollout not having replaced it yet.
@@ -365,14 +370,21 @@ func (s *watch) diagnose(ctx context.Context) *Diagnostics {
 	}
 	if len(objects) > 0 {
 		if events, err := s.w.Kube.Events(ctx, t.Namespace, objects, diagMaxEvents); err == nil {
-			d.Events = events
+			for _, e := range events {
+				size := len(e.Object) + len(e.Type) + len(e.Reason) + len(e.Message)
+				if size > budget {
+					break
+				}
+				d.Events = append(d.Events, e)
+				budget -= size
+			}
 		}
 	}
 
 	logs := 0
 	for _, p := range bad {
 		for _, c := range p.Containers {
-			if c.Ready || logs >= diagMaxContainers {
+			if c.Ready || logs >= diagMaxContainers || budget <= 0 {
 				continue
 			}
 			// After a crash the useful lines are in the previous instance.
@@ -385,11 +397,53 @@ func (s *watch) diagnose(ctx context.Context) *Diagnostics {
 			if previous {
 				key += " (previous)"
 			}
+			// The end of a log is where the failure is, so keep the tail.
+			text = keepTail(text, budget-len(key))
+			if text == "" {
+				continue
+			}
 			d.Logs[key] = text
+			budget -= len(key) + len(text)
 			logs++
 		}
 	}
 	return d
+}
+
+// keepHead returns at most limit bytes from the start of s, without cutting
+// a UTF-8 character.
+func keepHead(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(s) <= limit {
+		return s
+	}
+	end := limit
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end]
+}
+
+// keepTail returns at most limit bytes from the end of s. When it has to
+// cut, it starts at a line boundary so the first line is not a fragment,
+// unless that would leave nothing.
+func keepTail(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(s) <= limit {
+		return s
+	}
+	tail := s[len(s)-limit:]
+	if i := strings.IndexByte(tail, '\n'); i >= 0 && i+1 < len(tail) {
+		return tail[i+1:]
+	}
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+	return tail
 }
 
 // runsTag reports whether any regular container of the pod runs tag.

@@ -233,6 +233,59 @@ func TestWaitHealthy_CrashLoopFailsEarlyWithDiagnostics(t *testing.T) {
 	}
 }
 
+// Diagnostics are stored with the step, so all of them together stay
+// within 64 KiB, however long the logs are. The end of each log is kept,
+// because that is where the crash is.
+func TestWaitHealthy_DiagnosticsAreCapped(t *testing.T) {
+	crashing := func(restarts int32) []steps.Pod {
+		return []steps.Pod{
+			pod("n1", "e4f5a6b", false, restarts, "CrashLoopBackOff"),
+			pod("n2", "e4f5a6b", false, restarts, "CrashLoopBackOff"),
+			pod("n3", "e4f5a6b", false, restarts, "CrashLoopBackOff"),
+		}
+	}
+	kube := kubeWith(crashing(0), crashing(3))
+	long := strings.Repeat("noise noise noise noise noise noise noise noise\n", 900) // ~43 KiB
+	for _, p := range []string{"n1", "n2", "n3"} {
+		kube.LogText[p+"/backend/previous"] = long + "panic: " + p + " cannot reach the database\n"
+	}
+	argo := argoWith(steps.AppState{SyncStatus: "Synced", Health: "Progressing", SyncRevision: ourSHA,
+		HealthMessage: strings.Repeat("é", 200)})
+
+	res, err, _ := run(t, argo, kube, deployIn(), newClock())
+	if err == nil || !strings.Contains(err.Error(), "restarted 3 times") {
+		t.Fatalf("err = %v, want a crash-loop failure", err)
+	}
+	d := res.Outputs.Diagnostics
+	size := len(d.HealthMessage)
+	for _, e := range d.Events {
+		size += len(e.Object) + len(e.Type) + len(e.Reason) + len(e.Message)
+	}
+	for k, v := range d.Logs {
+		size += len(k) + len(v)
+		if !strings.HasSuffix(v, "cannot reach the database\n") {
+			t.Fatalf("%s lost the end of its log", k)
+		}
+		if !strings.HasPrefix(v, "noise") && !strings.HasPrefix(v, "panic") {
+			t.Fatalf("%s starts mid-line: %q", k, v[:20])
+		}
+	}
+	if size > 64<<10 {
+		t.Fatalf("diagnostics are %d bytes, want at most %d", size, 64<<10)
+	}
+	if len(d.Logs) == 0 || !strings.Contains(d.Logs["n1/backend (previous)"], "panic: n1") {
+		t.Fatalf("the first failing pod's log must be kept, got keys %v", keys(d.Logs))
+	}
+}
+
+func keys(m map[string]string) []string {
+	var k []string
+	for key := range m {
+		k = append(k, key)
+	}
+	return k
+}
+
 // A pod that has been crashing since before this step started does not
 // count against it: only restarts seen during the step do.
 func TestWaitHealthy_RestartsCountFromFirstSight(t *testing.T) {
