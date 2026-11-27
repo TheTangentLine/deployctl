@@ -79,6 +79,20 @@ type Outputs struct {
 	CommitSHA string   // commit that carries the change (set by git_commit)
 
 	Diagnostics *Diagnostics // set by wait_healthy on failure
+	Deployment  *Deployment  // set by finalize for deploy and rollback
+}
+
+// Deployment is a deploy or rollback that went live and healthy. finalize
+// returns it and the worker inserts it into the deployments table in the
+// same transaction that completes the request, ignoring a second insert
+// for the same RequestID. History reads these rows to pick rollback
+// targets. The worker adds who deployed it (the requester) and when.
+type Deployment struct {
+	App         string
+	Environment string
+	Tag         string
+	CommitSHA   string
+	RequestID   string
 }
 
 // Diagnostics is what wait_healthy captures when a rollout fails, so the
